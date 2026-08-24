@@ -44,7 +44,7 @@ read the `.d.ts` rather than loosening the test.
 Vertex serves Grok over the **OpenAI-completions** protocol at
 `/v1/projects/<project>/locations/global/endpoints/openapi`, authenticated with a short-lived (~1h)
 Google OAuth2 access token rather than a static key. So the provider is thin: `api` is pi's own
-`openAICompletionsApi()`, and `auth.oauth` mints and renews through `google-auth-library`. pi does
+`openAICompletionsApi()`, and ambient `auth.apiKey` mints through `google-auth-library`. pi does
 streaming, tools, usage, and credential caching.
 
 It mirrors **no** pi internals, so it cannot drift against a pi release and needs no sync tooling.
@@ -66,9 +66,18 @@ another. `openAICompletionsApi` is not on the package root's types, so it comes 
 `-e <path>` to see the actual error.
 
 **The prose docs are stale; trust the `.d.ts`.** `docs/custom-provider.md` describes a top-level
-`oauth` with `refreshToken`/`getApiKey`. The shipped types want `auth: { oauth: {...} }` with
-`login`/`refresh`/`toAuth`, where `toAuth` returns a `ModelAuth` (`{ apiKey }`) and `login`/`refresh`
-return `{ type: "oauth", access, refresh, expires }` — the `type` tag is required.
+`oauth` with `refreshToken`/`getApiKey`. The shipped types want auth nested under `auth`, and the
+two shapes mean very different things — see below.
+
+**Use `auth.apiKey` with no `login`, never `auth.oauth`.** This is the subtlest trap here.
+`auth.oauth` means "an interactive login mints a credential pi persists to `~/.pi/agent/auth.json`",
+so pi refuses the provider until such a credential exists. ADC is not interactive — it is *ambient*,
+discovered from the environment — and pi's `ApiKeyAuth` documents an absent `login` as exactly that
+("Absent = ambient-only"), calling `resolve()` per request instead. Getting this wrong is nearly
+invisible: on a machine that once ran `pi login` it works perfectly, and on every fresh one it fails
+with `No API key found for xai-vertex`. It shipped in v0.1.0 and was caught only by running inside a
+clean CI sandbox. To test it, remove the provider's entry from `~/.pi/agent/auth.json` and run
+`pi -ne -e . --model xai-vertex/xai/grok-4.6 "hi"`.
 
 **One malformed entry breaks every provider.** `resolveCliModel` iterates *all* registered providers'
 models before picking one, so a bad model here takes down `anthropic-vertex`, `google`, everything.

@@ -3,14 +3,12 @@ import assert from "node:assert/strict";
 import { calculateCost, createProvider } from "@earendil-works/pi-ai";
 import type { Usage } from "@earendil-works/pi-ai";
 import {
-  EXPIRY_SKEW_MS,
-  FALLBACK_TTL_MS,
   GROK_4_6_COST,
   MODEL_ID,
   PROJECT_ENV_VARS,
   PROVIDER_ID,
   buildBaseUrl,
-  credentialFrom,
+  authResultFrom,
   resolveProject,
   xaiVertexProviderConfig,
 } from "./index.ts";
@@ -72,39 +70,18 @@ describe("buildBaseUrl", () => {
   });
 });
 
-describe("credentialFrom", () => {
-  const NOW = 1_000_000_000_000;
-
-  it("uses the credential's real expiry, minus the renewal skew", () => {
-    const oneHour = NOW + 3_600_000;
-    assert.equal(credentialFrom("tok", oneHour, NOW).expires, oneHour - EXPIRY_SKEW_MS);
+describe("authResultFrom", () => {
+  it("hands pi the access token as the request apiKey", () => {
+    assert.deepEqual(authResultFrom("tok"), { auth: { apiKey: "tok" }, source: "Google ADC" });
   });
 
-  it("falls back to a fixed TTL when the credential exposes no expiry", () => {
-    for (const missing of [undefined, null]) {
-      assert.equal(credentialFrom("tok", missing, NOW).expires, NOW + FALLBACK_TTL_MS);
-    }
+  it("labels the source so pi's status UI names ADC rather than a key", () => {
+    assert.equal(authResultFrom("tok").source, "Google ADC");
   });
 
-  it("falls back rather than returning an already-expired credential", () => {
-    assert.equal(credentialFrom("tok", NOW - 1, NOW).expires, NOW + FALLBACK_TTL_MS);
-  });
-
-  it("renews strictly before the real expiry", () => {
-    const expiry = NOW + 3_600_000;
-    assert.ok(credentialFrom("tok", expiry, NOW).expires < expiry);
-  });
-
-  it('tags the credential "oauth" — pi rejects the object without it', () => {
-    const cred = credentialFrom("tok", null, NOW);
-    assert.equal(cred.type, "oauth");
-    assert.equal(cred.access, "tok");
-    assert.equal(typeof cred.refresh, "string");
-  });
-
-  it("throws an actionable error instead of registering an empty token", () => {
+  it("throws an actionable error instead of returning an empty token", () => {
     for (const empty of [undefined, null, ""]) {
-      assert.throws(() => credentialFrom(empty, NOW + 1000, NOW), /no access token/i);
+      assert.throws(() => authResultFrom(empty), /no access token/i);
     }
   });
 });
@@ -183,16 +160,30 @@ describe("xaiVertexProviderConfig", () => {
     assert.ok(xaiVertexProviderConfig("other-proj").baseUrl.includes("/projects/other-proj/"));
   });
 
-  it("authenticates through pi's oauth block, not a static apiKey", () => {
-    assert.ok(config.auth.oauth, "oauth must nest under `auth`, not sit at the top level");
-    assert.equal(typeof config.auth.oauth.login, "function");
-    assert.equal(typeof config.auth.oauth.refresh, "function", "method is `refresh`, not `refreshToken`");
-    assert.equal(typeof config.auth.oauth.toAuth, "function", "method is `toAuth`, not `getApiKey`");
-    assert.ok(!("apiKey" in config), "a static apiKey would defeat token renewal");
+  // Auth must be AMBIENT, not interactive. pi treats `auth.oauth` as "an interactive login mints a
+  // credential I persist to auth.json", and refuses the provider until one exists — which passes on
+  // a machine that logged in once and fails on every fresh one, including a sandbox, with
+  // "No API key found for xai-vertex". ADC is discovered from the environment, so the right shape
+  // is apiKey with no `login` ("Absent = ambient-only" in pi's own ApiKeyAuth docs).
+  it("uses ambient apiKey auth, never the interactive oauth flow", () => {
+    assert.ok(config.auth.apiKey, "auth must be apiKey-shaped");
+    assert.ok(!("oauth" in config.auth), "oauth would require an interactive login first");
   });
 
-  it("hands pi a ModelAuth object, not a bare token string", async () => {
-    assert.deepEqual(await config.auth.oauth.toAuth({ access: "tok" }), { apiKey: "tok" });
+  it("declares no login handler, which is what marks it ambient-only", () => {
+    assert.ok(
+      !("login" in config.auth.apiKey) || config.auth.apiKey.login === undefined,
+      "a login handler makes pi wait for an interactive credential",
+    );
+  });
+
+  it("exposes resolve and a side-effect-free check", () => {
+    assert.equal(typeof config.auth.apiKey.resolve, "function");
+    assert.equal(typeof config.auth.apiKey.check, "function", "check lets pi test availability without minting");
+  });
+
+  it("does not pin a static key on the provider", () => {
+    assert.ok(!("apiKey" in config), "a static top-level apiKey would defeat per-request token minting");
   });
 
   it("declares exactly the pricing asserted above", () => {

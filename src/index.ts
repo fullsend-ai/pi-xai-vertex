@@ -45,7 +45,7 @@
 // declarations are the accurate ones.
 import { createProvider } from "@earendil-works/pi-ai";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/compat";
-import type { Model, ModelCost, OAuthCredential } from "@earendil-works/pi-ai";
+import type { AuthResult, Model, ModelCost } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { GoogleAuth } from "google-auth-library";
 
@@ -74,42 +74,28 @@ export function buildBaseUrl(project: string): string {
   return `https://aiplatform.googleapis.com/v1/projects/${project}/locations/global/endpoints/openapi`;
 }
 
-/** Renew a minute early so an in-flight request can't be the one that discovers the expiry. */
-export const EXPIRY_SKEW_MS = 60_000;
-/**
- * Only used when the credential type doesn't expose expiry_date (some impersonation paths).
- * Google access tokens last ~1h; 55m keeps the fallback inside that even with clock drift.
- */
-export const FALLBACK_TTL_MS = 55 * 60 * 1000;
-
-// OAuthCredential, Model and ModelCost are imported from pi rather than re-declared locally. A
-// hand-rolled equivalent is subtly non-assignable (pi's carries an index signature), which forces a
-// cast at the createProvider() call — and that cast would switch off the one compile-time check that
-// catches a provider or model entry pi can no longer accept. Keep these bound to pi's own types so a
-// pi upgrade fails `npm run lint` here instead of throwing at model resolution in production.
+// AuthResult, Model and ModelCost are imported from pi rather than re-declared locally. A
+// hand-rolled equivalent is subtly non-assignable, which forces a cast at the createProvider() call
+// — and that cast would switch off the one compile-time check that catches a provider or model
+// entry pi can no longer accept. Keep these bound to pi's own types so a pi upgrade fails
+// `npm run lint` here instead of throwing at model resolution in production.
+//
+// Token lifetime is deliberately not tracked here: google-auth-library caches the access token and
+// re-mints it when it ages out, and pi calls resolve() per request, so there is no expiry
+// arithmetic to get wrong.
 
 /**
- * Build pi's oauth credential from what google-auth-library returned. Prefers the credential's real
- * expiry (minus skew) and falls back to a fixed TTL when it is absent or already in the past.
+ * Turn what google-auth-library returned into pi's request auth. Vertex takes the access token as a
+ * bearer token, which pi sends as the `apiKey`.
  */
-export function credentialFrom(
-  token: string | null | undefined,
-  expiryDate: number | null | undefined,
-  now: number = Date.now(),
-): OAuthCredential {
+export function authResultFrom(token: string | null | undefined): AuthResult {
   if (!token) {
     throw new Error(
       "xai-vertex: Google ADC returned no access token. Run `gcloud auth application-default login`, " +
         "or point GOOGLE_APPLICATION_CREDENTIALS at a credential config.",
     );
   }
-  const expires =
-    typeof expiryDate === "number" && expiryDate > now
-      ? expiryDate - EXPIRY_SKEW_MS
-      : now + FALLBACK_TTL_MS;
-  // `refresh` is required on pi's oauth credential, but ADC holds the real refresh material itself —
-  // google-auth-library re-derives the token from it, so there is nothing to persist here.
-  return { type: "oauth", access: token, refresh: "adc", expires };
+  return { auth: { apiKey: token }, source: "Google ADC" };
 }
 
 /**
@@ -161,12 +147,24 @@ export function xaiVertexProviderConfig(project: string) {
     name: "xAI Grok (Vertex)",
     baseUrl,
     auth: {
-      oauth: {
+      // Ambient-only auth: no `login`, because there is nothing interactive to do — the credential
+      // is Application Default Credentials, discovered from the environment. pi's ApiKeyAuth
+      // documents an absent `login` as exactly this ("Absent = ambient-only"), and calls `resolve`
+      // per request, so google-auth-library's own caching and renewal stay in charge of expiry.
+      //
+      // This must NOT be `auth.oauth`: that shape means "an interactive login mints a credential pi
+      // then persists to ~/.pi/agent/auth.json", so pi refuses to use the provider until such a
+      // credential exists. It appears to work on a machine that once logged in, and fails on every
+      // fresh one — including a sandbox — with "No API key found for xai-vertex".
+      apiKey: {
         name: "Google Cloud ADC (xAI Vertex)",
-        login: mintCredential,
-        refresh: mintCredential,
-        async toAuth(credential: { access: string }) {
-          return { apiKey: credential.access };
+        async check() {
+          // Side-effect-free: resolve() shells out to the credential chain, so pi asks this first
+          // to decide whether the model is available.
+          return (await hasAdcCredentials()) ? { type: "api_key" as const, source: "Google ADC" } : undefined;
+        },
+        async resolve() {
+          return authResultFrom(await mintAccessToken());
         },
       },
     },
@@ -179,11 +177,25 @@ export function xaiVertexProviderConfig(project: string) {
 // repeated getAccessToken() calls only hit the network once the token has actually aged out.
 let auth: GoogleAuth | undefined;
 
-async function mintCredential(): Promise<OAuthCredential> {
+function googleAuth(): GoogleAuth {
   auth ??= new GoogleAuth({ scopes: ["https://www.googleapis.com/auth/cloud-platform"] });
-  const client = await auth.getClient();
+  return auth;
+}
+
+async function mintAccessToken(): Promise<string | null | undefined> {
+  const client = await googleAuth().getClient();
   const { token } = await client.getAccessToken();
-  return credentialFrom(token, client.credentials?.expiry_date);
+  return token;
+}
+
+/** Whether ADC can be discovered at all, without minting a token. */
+async function hasAdcCredentials(): Promise<boolean> {
+  try {
+    await googleAuth().getClient();
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export default function (pi: ExtensionAPI) {
