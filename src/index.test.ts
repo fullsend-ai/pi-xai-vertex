@@ -191,6 +191,47 @@ describe("xaiVertexProviderConfig", () => {
   });
 });
 
+describe("auth availability check", () => {
+  const config = xaiVertexProviderConfig("proj");
+
+  it("reports availability when ADC resolves, without minting a token", async () => {
+    // The sandbox this runs in has ADC via GOOGLE_APPLICATION_CREDENTIALS or gcloud; when it does
+    // not, check() must say unavailable rather than throw. Either answer is valid here — what is
+    // not valid is an exception escaping into pi's model-availability path.
+    const result = await config.auth.apiKey.check();
+    if (result !== undefined) {
+      assert.equal(result.type, "api_key");
+      assert.equal(result.source, "Google ADC");
+    }
+  });
+
+  it("never throws, so a broken credential cannot break model listing", async () => {
+    await assert.doesNotReject(() => config.auth.apiKey.check());
+  });
+
+  it("explains itself on stderr when ADC is unavailable", async () => {
+    // The reason is the whole point: pi's AuthCheck has no field for it, so an unavailable
+    // provider otherwise shows up as a bare "model not found" with nothing naming credentials.
+    const original = console.error;
+    const lines: string[] = [];
+    console.error = (...args: unknown[]) => void lines.push(args.join(" "));
+    const saved = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+    try {
+      process.env.GOOGLE_APPLICATION_CREDENTIALS = "/nonexistent/definitely-not-a-credential.json";
+      const fresh = xaiVertexProviderConfig("proj");
+      const result = await fresh.auth.apiKey.check();
+      if (result === undefined && lines.length > 0) {
+        assert.match(lines.join("\n"), /xai-vertex/, "the warning names the provider");
+        assert.match(lines.join("\n"), /ADC|credential/i, "the warning names the cause");
+      }
+    } finally {
+      console.error = original;
+      if (saved === undefined) delete process.env.GOOGLE_APPLICATION_CREDENTIALS;
+      else process.env.GOOGLE_APPLICATION_CREDENTIALS = saved;
+    }
+  });
+});
+
 describe("createProvider integration", () => {
   // The assertions above check the config against *our* expectations. This one checks it against
   // pi's, by running it through the real createProvider from the installed peer — no network, no

@@ -21,13 +21,20 @@
 // implementations above default to "global" too.
 //
 // Auth: Vertex requires a short-lived (~1hr) OAuth2 access token minted from Application Default
-// Credentials, not a static API key. Reuses pi's own `auth.oauth` block (see docs/custom-provider.md)
-// so pi handles expiry/caching/persistence to ~/.pi/agent/auth.json and calls refresh() for you —
-// no separate proxy process, no manual re-export needed. Token minting uses the Node
-// google-auth-library (declared in this directory's package.json) rather than shelling out to
-// python3's google.auth: it is the same library the Claude-on-Vertex path already depends on, it
-// needs no child_process on the credential path, and it is the only one proven against the
-// rewritten external_account config that fullsend's prepare-sandbox-credentials.sh hands a sandbox.
+// Credentials, not a static API key. ADC is *ambient* — discovered from the environment, with
+// nothing for a user to type — so this registers `auth.apiKey` with **no `login` handler**, which is
+// how pi spells "ambient-only", and pi calls `resolve()` per request. Do NOT switch this to
+// `auth.oauth`: that shape means "an interactive login mints a credential pi persists to
+// ~/.pi/agent/auth.json", so pi refuses the provider until one exists. It shipped that way in v0.1.0
+// and looked fine on any machine that had logged in once, while failing on every fresh environment
+// with "No API key found for xai-vertex".
+//
+// Token minting uses the Node google-auth-library (declared in this directory's package.json)
+// rather than shelling out to python3's google.auth: it is the same library the Claude-on-Vertex
+// path already depends on, it needs no child_process on the credential path, it is the only one
+// proven against the rewritten external_account config that fullsend's
+// prepare-sandbox-credentials.sh hands a sandbox, and it does its own token caching and renewal —
+// which is why there is no expiry arithmetic here.
 //
 // The GCP project comes from an env var and is never hardcoded here: it is deployment-specific
 // config, and this source is public.
@@ -188,12 +195,33 @@ async function mintAccessToken(): Promise<string | null | undefined> {
   return token;
 }
 
-/** Whether ADC can be discovered at all, without minting a token. */
+/**
+ * Whether ADC can be discovered at all, without minting a token.
+ *
+ * pi's `AuthCheck` can only say available/unavailable — there is no field for a reason — so an
+ * unavailable provider otherwise surfaces as a bare "model not found", with nothing pointing at the
+ * credentials. Since that opacity is what made the v0.1.0 auth bug hard to spot in the first place,
+ * the discovery failure is written to stderr before returning false. pi captures extension stderr
+ * (fullsend tees it to pi-debug.log), and this only fires when ADC is genuinely broken.
+ *
+ * Warned once per process: pi calls check() for each model-availability query, and repeating an
+ * identical multi-line credential error turns a useful hint into noise.
+ */
+let warnedAdcUnavailable = false;
+
 async function hasAdcCredentials(): Promise<boolean> {
   try {
     await googleAuth().getClient();
     return true;
-  } catch {
+  } catch (error) {
+    if (!warnedAdcUnavailable) {
+      warnedAdcUnavailable = true;
+      const reason = error instanceof Error ? error.message : String(error);
+      console.error(
+        `[xai-vertex] Google ADC unavailable, so the provider will not be offered: ${reason}. ` +
+          "Run `gcloud auth application-default login`, or point GOOGLE_APPLICATION_CREDENTIALS at a credential config.",
+      );
+    }
     return false;
   }
 }
