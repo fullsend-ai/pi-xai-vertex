@@ -110,6 +110,23 @@ request-wide by design; do not convert it to per-token splitting.
 - Commit format `{feat,fix,docs}: <concise message>`, no emojis, and sign off:
   `Signed-off-by: <name> <email>`.
 
+## Releasing
+
+Tag and push; `.github/workflows/release.yml` does the rest.
+
+```bash
+git tag -a v0.2.0 -m "v0.2.0"
+git push origin v0.2.0
+```
+
+It re-runs lint and tests (never cut a release from a tree that does not pass), computes the SHA256
+of the tag tarball, and publishes a release whose notes carry the tarball URL and digest — the pair
+pinned consumers need. fullsend's sandbox Containerfile fetches that tarball and verifies the
+digest, so it is published rather than left for each consumer to derive.
+
+There is no npm publish step: the package is consumed with `pi install git:...`, so the git tag is
+the artifact. Adding one is a few lines plus an `NPM_TOKEN` secret if that ever changes.
+
 ## Prior art
 
 Not drop-in for pi, but the same idea, and worth reading before changing the auth path:
