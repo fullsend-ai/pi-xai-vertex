@@ -30,7 +30,7 @@ because it depends on `google-auth-library`.
 └── .github/workflows/ci.yml
 ```
 
-`src/index.ts` keeps all logic in pure exports — `resolveProject`, `buildBaseUrl`, `credentialFrom`,
+`src/index.ts` keeps all logic in pure exports — `resolveProject`, `buildBaseUrl`, `authResultFrom`,
 `GROK_4_6_COST`, `xaiVertexProviderConfig` — with a thin `default` that registers them. The suite
 therefore runs with no pi, no network, and no GCP credentials.
 
@@ -83,8 +83,8 @@ clean CI sandbox. To test it, remove the provider's entry from `~/.pi/agent/auth
 models before picking one, so a bad model here takes down `anthropic-vertex`, `google`, everything.
 After any provider or model change, run `pi --list-models` and confirm the *others* still resolve.
 
-This is also why `Model`, `ModelCost` and `OAuthCredential` are imported from pi rather than
-re-declared, and why there are no casts: a hand-rolled `OAuthCredential` is subtly non-assignable
+This is also why `Model`, `ModelCost` and `AuthResult` are imported from pi rather than
+re-declared, and why there are no casts: a hand-rolled equivalent is subtly non-assignable
 (pi's carries an index signature), and `as never` would silence exactly the check that catches a
 schema break before production.
 
@@ -118,6 +118,17 @@ request-wide by design; do not convert it to per-token splitting.
   vendor docs.
 - Commit format `{feat,fix,docs}: <concise message>`, no emojis, and sign off:
   `Signed-off-by: <name> <email>`.
+
+## Upgrading from v0.1.0
+
+v0.1.0 declared `auth.oauth`, so a machine that ran `pi login` for this provider has a
+`{ "type": "oauth" }` entry for it in `~/.pi/agent/auth.json`. pi resolves auth by *stored
+credential type* first, so that entry makes pi skip the ambient path entirely and the provider
+disappears — on a machine that previously worked.
+
+Remove the `xai-vertex` entry from that file (`pi logout xai-vertex`, or edit it out). The extension
+detects the leftover entry at load and prints exactly this instruction, so the failure is
+self-explaining rather than looking like the bug v0.1.1 fixed.
 
 ## Releasing
 

@@ -10,6 +10,7 @@ import {
   buildBaseUrl,
   authResultFrom,
   resolveProject,
+  staleOAuthCredentialPath,
   xaiVertexProviderConfig,
 } from "./index.ts";
 
@@ -188,6 +189,33 @@ describe("xaiVertexProviderConfig", () => {
 
   it("declares exactly the pricing asserted above", () => {
     assert.deepEqual(config.models[0].cost, GROK_4_6_COST);
+  });
+});
+
+describe("staleOAuthCredentialPath", () => {
+  // The v0.1.0 -> v0.1.1 upgrade hazard: pi resolves auth by *stored credential type* first, so a
+  // leftover {"type":"oauth"} entry makes pi skip the ambient path and drop the provider on a
+  // machine that used to work. Detecting it is the difference between a self-explaining message
+  // and a mystery that looks exactly like the bug this version fixed.
+  it("detects a leftover oauth credential for this provider", () => {
+    const path = staleOAuthCredentialPath(() => JSON.stringify({ "xai-vertex": { type: "oauth", access: "x" } }));
+    assert.ok(path, "a stored oauth credential for this provider must be reported");
+    assert.match(path, /auth\.json$/);
+  });
+
+  it("ignores an api_key credential, which is the shape this version uses", () => {
+    assert.equal(staleOAuthCredentialPath(() => JSON.stringify({ "xai-vertex": { type: "api_key" } })), undefined);
+  });
+
+  it("ignores other providers' oauth credentials", () => {
+    assert.equal(staleOAuthCredentialPath(() => JSON.stringify({ anthropic: { type: "oauth" } })), undefined);
+  });
+
+  it("is quiet when there is no auth.json, or it is unreadable or not JSON", () => {
+    assert.equal(staleOAuthCredentialPath(() => { throw new Error("ENOENT"); }), undefined);
+    assert.equal(staleOAuthCredentialPath(() => "not json at all"), undefined);
+    assert.equal(staleOAuthCredentialPath(() => "null"), undefined);
+    assert.equal(staleOAuthCredentialPath(() => "{}"), undefined);
   });
 });
 

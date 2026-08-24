@@ -15,7 +15,7 @@ npm run ci      # lint + test — must pass before any commit
 
 ## Rules
 
-- **Never cast at `createProvider()`.** `Model`, `ModelCost` and `OAuthCredential` come from
+- **Never cast at `createProvider()`.** `Model`, `ModelCost` and `AuthResult` come from
   `@earendil-works/pi-ai`. Fix type errors; never silence them with `as never` or `@ts-ignore`.
 - **Import only from pi's allowlisted specifiers**: `@earendil-works/pi-ai`, `.../compat`,
   `.../oauth`, `.../providers/all`, `@earendil-works/pi-coding-agent`. Any other subpath fails to

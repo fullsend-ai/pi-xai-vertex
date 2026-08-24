@@ -53,7 +53,9 @@
 import { createProvider } from "@earendil-works/pi-ai";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/compat";
 import type { AuthResult, Model, ModelCost } from "@earendil-works/pi-ai";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { GoogleAuth } from "google-auth-library";
 
 /** Env vars consulted for the GCP project, in precedence order. */
@@ -166,8 +168,10 @@ export function xaiVertexProviderConfig(project: string) {
       apiKey: {
         name: "Google Cloud ADC (xAI Vertex)",
         async check() {
-          // Side-effect-free: resolve() shells out to the credential chain, so pi asks this first
-          // to decide whether the model is available.
+          // Side-effect-free relative to resolve(), which performs request-time credential
+          // discovery — so pi asks this first to decide whether the model is available. (Note this
+          // can still touch the network: with no other ADC source configured, google-auth-library
+          // probes the GCE metadata server.)
           return (await hasAdcCredentials()) ? { type: "api_key" as const, source: "Google ADC" } : undefined;
         },
         async resolve() {
@@ -226,12 +230,49 @@ async function hasAdcCredentials(): Promise<boolean> {
   }
 }
 
+/**
+ * v0.1.0 declared `auth.oauth`, so anyone who ran `pi login` for this provider has a
+ * `{ "type": "oauth" }` entry for it in auth.json. pi resolves auth by *stored credential type*
+ * first: with a stored oauth credential and no `auth.oauth` on the provider, both
+ * resolveProviderAuth() and checkProviderAuth() short-circuit to undefined and never reach the
+ * ambient apiKey path below. The provider then vanishes from --list-models and requests fail with
+ * "No API key found" — on a machine that used to work.
+ *
+ * pi gates before calling into the provider, so the extension cannot intercept and repair this at
+ * resolve time. Detect it at load and say exactly what to delete, so the failure explains itself
+ * instead of looking like the bug v0.1.1 fixed.
+ */
+export function staleOAuthCredentialPath(readFile: (p: string) => string = (f) => readFileSync(f, "utf8")): string | undefined {
+  let authPath: string;
+  try {
+    authPath = join(getAgentDir(), "auth.json");
+  } catch {
+    return undefined;
+  }
+  try {
+    const stored = JSON.parse(readFile(authPath)) as Record<string, { type?: string } | undefined>;
+    return stored?.[PROVIDER_ID]?.type === "oauth" ? authPath : undefined;
+  } catch {
+    // No auth.json, unreadable, or not JSON — nothing to migrate.
+    return undefined;
+  }
+}
+
 export default function (pi: ExtensionAPI) {
   const project = resolveProject();
   if (!project) {
     // No project configured — don't register a provider that would fail at call time with a
     // confusing auth error. Silently skip, same posture as a disabled hook.
     return;
+  }
+  const stale = staleOAuthCredentialPath();
+  if (stale) {
+    console.error(
+      `[${PROVIDER_ID}] Found a leftover OAuth credential from v0.1.0 in ${stale}. ` +
+        `Auth is now ambient (Application Default Credentials), and pi will ignore this provider ` +
+        `while that entry exists. Remove the "${PROVIDER_ID}" entry from that file — ` +
+        `\`pi logout ${PROVIDER_ID}\` if your pi version supports it, otherwise edit it out.`,
+    );
   }
   pi.registerProvider(createProvider(xaiVertexProviderConfig(project)));
 }
