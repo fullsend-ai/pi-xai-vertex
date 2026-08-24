@@ -19,6 +19,7 @@ create_issues:
         repos:
             - fullsend-ai/pi-xai-vertex
             - fullsend-ai/fullsend
+mint_url: https://mint.fullsend.sh
 inference:
     project: it-gcp-konflux-dev-fullsend
     wif_provider: projects/855403973659/locations/global/workloadIdentityPools/fullsend-inference/providers/gh-fullsend-ai-pi-xai-vertex
