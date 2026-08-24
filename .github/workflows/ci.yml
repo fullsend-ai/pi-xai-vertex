@@ -1,0 +1,24 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+      # Peers (pi itself) are installed here on purpose: `tsc` and the tests need pi's types.
+      # Consumers must install with --omit=peer so the running pi is never shadowed by a second
+      # copy of @earendil-works/* — see README, "Installing as a consumer".
+      - run: npm ci
+      - run: npm run ci

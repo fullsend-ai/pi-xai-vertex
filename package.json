@@ -1,0 +1,44 @@
+{
+  "name": "@fullsend-ai/pi-xai-vertex",
+  "version": "0.1.0",
+  "description": "xAI Grok models on Google Cloud Vertex AI for pi",
+  "type": "module",
+  "main": "src/index.ts",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fullsend-ai/pi-xai-vertex.git"
+  },
+  "homepage": "https://github.com/fullsend-ai/pi-xai-vertex#readme",
+  "bugs": {
+    "url": "https://github.com/fullsend-ai/pi-xai-vertex/issues"
+  },
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "scripts": {
+    "test": "node --test src/index.test.ts",
+    "lint": "tsc --noEmit",
+    "ci": "npm run lint && npm run test"
+  },
+  "dependencies": {
+    "google-auth-library": "9.15.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.3.0",
+    "typescript": "^6.0.3"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": ">=0.84.0",
+    "@earendil-works/pi-coding-agent": ">=0.84.0"
+  },
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "xai",
+    "grok",
+    "vertex-ai"
+  ],
+  "license": "MIT"
+}
