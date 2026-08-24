@@ -15,11 +15,15 @@ npm run ci      # lint + test — must pass before any commit
 
 ## Rules
 
-- **Never cast at `createProvider()`.** `Model`, `ModelCost` and `OAuthCredential` come from
+- **Never cast at `createProvider()`.** `Model`, `ModelCost` and `AuthResult` come from
   `@earendil-works/pi-ai`. Fix type errors; never silence them with `as never` or `@ts-ignore`.
 - **Import only from pi's allowlisted specifiers**: `@earendil-works/pi-ai`, `.../compat`,
   `.../oauth`, `.../providers/all`, `@earendil-works/pi-coding-agent`. Any other subpath fails to
   load — silently, since pi drops a failed extension from `--list-models` without printing anything.
+- **Auth is ambient: `auth.apiKey` with no `login`, never `auth.oauth`.** ADC comes from the
+  environment; `oauth` makes pi wait for a persisted interactive credential and fails on any fresh
+  machine (it shipped that way in v0.1.0). Verify by deleting the provider's `~/.pi/agent/auth.json`
+  entry, then `pi -ne -e . --model xai-vertex/xai/grok-4.6 "hi"`.
 - **Trust `node_modules/@earendil-works/pi-ai/dist/**/*.d.ts`, not pi's prose docs.**
 - **Re-test other providers after any provider/model change** with `pi --list-models`: one bad entry
   breaks every registered provider, not just this one.

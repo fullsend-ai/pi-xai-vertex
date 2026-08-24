@@ -11,8 +11,14 @@ export XAI_VERTEX_PROJECT_ID=your-gcp-project
 gcloud auth application-default login
 ```
 
-That's it — no `XAI_API_KEY`. Auth uses Application Default Credentials, the same as the
-Claude-on-Vertex setup, and pi renews the token for you.
+That's it — no `XAI_API_KEY` and no `pi login`. Auth uses Application Default Credentials, the same
+as the Claude-on-Vertex setup. Auth is resolved per request from ADC; `google-auth-library` caches
+the token and only re-mints it near expiry, so a fresh machine or a CI sandbox needs nothing beyond
+ADC.
+
+> **Upgrading from v0.1.0?** Remove the `xai-vertex` entry from `~/.pi/agent/auth.json`
+> (`pi logout xai-vertex`). v0.1.0 stored an OAuth credential there, and pi resolves auth by stored
+> credential type — so that leftover entry makes pi skip this provider entirely.
 
 ## Use
 

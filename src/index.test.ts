@@ -3,15 +3,14 @@ import assert from "node:assert/strict";
 import { calculateCost, createProvider } from "@earendil-works/pi-ai";
 import type { Usage } from "@earendil-works/pi-ai";
 import {
-  EXPIRY_SKEW_MS,
-  FALLBACK_TTL_MS,
   GROK_4_6_COST,
   MODEL_ID,
   PROJECT_ENV_VARS,
   PROVIDER_ID,
   buildBaseUrl,
-  credentialFrom,
+  authResultFrom,
   resolveProject,
+  staleOAuthCredentialPath,
   xaiVertexProviderConfig,
 } from "./index.ts";
 
@@ -72,39 +71,18 @@ describe("buildBaseUrl", () => {
   });
 });
 
-describe("credentialFrom", () => {
-  const NOW = 1_000_000_000_000;
-
-  it("uses the credential's real expiry, minus the renewal skew", () => {
-    const oneHour = NOW + 3_600_000;
-    assert.equal(credentialFrom("tok", oneHour, NOW).expires, oneHour - EXPIRY_SKEW_MS);
+describe("authResultFrom", () => {
+  it("hands pi the access token as the request apiKey", () => {
+    assert.deepEqual(authResultFrom("tok"), { auth: { apiKey: "tok" }, source: "Google ADC" });
   });
 
-  it("falls back to a fixed TTL when the credential exposes no expiry", () => {
-    for (const missing of [undefined, null]) {
-      assert.equal(credentialFrom("tok", missing, NOW).expires, NOW + FALLBACK_TTL_MS);
-    }
+  it("labels the source so pi's status UI names ADC rather than a key", () => {
+    assert.equal(authResultFrom("tok").source, "Google ADC");
   });
 
-  it("falls back rather than returning an already-expired credential", () => {
-    assert.equal(credentialFrom("tok", NOW - 1, NOW).expires, NOW + FALLBACK_TTL_MS);
-  });
-
-  it("renews strictly before the real expiry", () => {
-    const expiry = NOW + 3_600_000;
-    assert.ok(credentialFrom("tok", expiry, NOW).expires < expiry);
-  });
-
-  it('tags the credential "oauth" — pi rejects the object without it', () => {
-    const cred = credentialFrom("tok", null, NOW);
-    assert.equal(cred.type, "oauth");
-    assert.equal(cred.access, "tok");
-    assert.equal(typeof cred.refresh, "string");
-  });
-
-  it("throws an actionable error instead of registering an empty token", () => {
+  it("throws an actionable error instead of returning an empty token", () => {
     for (const empty of [undefined, null, ""]) {
-      assert.throws(() => credentialFrom(empty, NOW + 1000, NOW), /no access token/i);
+      assert.throws(() => authResultFrom(empty), /no access token/i);
     }
   });
 });
@@ -183,20 +161,102 @@ describe("xaiVertexProviderConfig", () => {
     assert.ok(xaiVertexProviderConfig("other-proj").baseUrl.includes("/projects/other-proj/"));
   });
 
-  it("authenticates through pi's oauth block, not a static apiKey", () => {
-    assert.ok(config.auth.oauth, "oauth must nest under `auth`, not sit at the top level");
-    assert.equal(typeof config.auth.oauth.login, "function");
-    assert.equal(typeof config.auth.oauth.refresh, "function", "method is `refresh`, not `refreshToken`");
-    assert.equal(typeof config.auth.oauth.toAuth, "function", "method is `toAuth`, not `getApiKey`");
-    assert.ok(!("apiKey" in config), "a static apiKey would defeat token renewal");
+  // Auth must be AMBIENT, not interactive. pi treats `auth.oauth` as "an interactive login mints a
+  // credential I persist to auth.json", and refuses the provider until one exists — which passes on
+  // a machine that logged in once and fails on every fresh one, including a sandbox, with
+  // "No API key found for xai-vertex". ADC is discovered from the environment, so the right shape
+  // is apiKey with no `login` ("Absent = ambient-only" in pi's own ApiKeyAuth docs).
+  it("uses ambient apiKey auth, never the interactive oauth flow", () => {
+    assert.ok(config.auth.apiKey, "auth must be apiKey-shaped");
+    assert.ok(!("oauth" in config.auth), "oauth would require an interactive login first");
   });
 
-  it("hands pi a ModelAuth object, not a bare token string", async () => {
-    assert.deepEqual(await config.auth.oauth.toAuth({ access: "tok" }), { apiKey: "tok" });
+  it("declares no login handler, which is what marks it ambient-only", () => {
+    assert.ok(
+      !("login" in config.auth.apiKey) || config.auth.apiKey.login === undefined,
+      "a login handler makes pi wait for an interactive credential",
+    );
+  });
+
+  it("exposes resolve and a side-effect-free check", () => {
+    assert.equal(typeof config.auth.apiKey.resolve, "function");
+    assert.equal(typeof config.auth.apiKey.check, "function", "check lets pi test availability without minting");
+  });
+
+  it("does not pin a static key on the provider", () => {
+    assert.ok(!("apiKey" in config), "a static top-level apiKey would defeat per-request token minting");
   });
 
   it("declares exactly the pricing asserted above", () => {
     assert.deepEqual(config.models[0].cost, GROK_4_6_COST);
+  });
+});
+
+describe("staleOAuthCredentialPath", () => {
+  // The v0.1.0 -> v0.1.1 upgrade hazard: pi resolves auth by *stored credential type* first, so a
+  // leftover {"type":"oauth"} entry makes pi skip the ambient path and drop the provider on a
+  // machine that used to work. Detecting it is the difference between a self-explaining message
+  // and a mystery that looks exactly like the bug this version fixed.
+  it("detects a leftover oauth credential for this provider", () => {
+    const path = staleOAuthCredentialPath(() => JSON.stringify({ "xai-vertex": { type: "oauth", access: "x" } }));
+    assert.ok(path, "a stored oauth credential for this provider must be reported");
+    assert.match(path, /auth\.json$/);
+  });
+
+  it("ignores an api_key credential, which is the shape this version uses", () => {
+    assert.equal(staleOAuthCredentialPath(() => JSON.stringify({ "xai-vertex": { type: "api_key" } })), undefined);
+  });
+
+  it("ignores other providers' oauth credentials", () => {
+    assert.equal(staleOAuthCredentialPath(() => JSON.stringify({ anthropic: { type: "oauth" } })), undefined);
+  });
+
+  it("is quiet when there is no auth.json, or it is unreadable or not JSON", () => {
+    assert.equal(staleOAuthCredentialPath(() => { throw new Error("ENOENT"); }), undefined);
+    assert.equal(staleOAuthCredentialPath(() => "not json at all"), undefined);
+    assert.equal(staleOAuthCredentialPath(() => "null"), undefined);
+    assert.equal(staleOAuthCredentialPath(() => "{}"), undefined);
+  });
+});
+
+describe("auth availability check", () => {
+  const config = xaiVertexProviderConfig("proj");
+
+  it("reports availability when ADC resolves, without minting a token", async () => {
+    // The sandbox this runs in has ADC via GOOGLE_APPLICATION_CREDENTIALS or gcloud; when it does
+    // not, check() must say unavailable rather than throw. Either answer is valid here — what is
+    // not valid is an exception escaping into pi's model-availability path.
+    const result = await config.auth.apiKey.check();
+    if (result !== undefined) {
+      assert.equal(result.type, "api_key");
+      assert.equal(result.source, "Google ADC");
+    }
+  });
+
+  it("never throws, so a broken credential cannot break model listing", async () => {
+    await assert.doesNotReject(() => config.auth.apiKey.check());
+  });
+
+  it("explains itself on stderr when ADC is unavailable", async () => {
+    // The reason is the whole point: pi's AuthCheck has no field for it, so an unavailable
+    // provider otherwise shows up as a bare "model not found" with nothing naming credentials.
+    const original = console.error;
+    const lines: string[] = [];
+    console.error = (...args: unknown[]) => void lines.push(args.join(" "));
+    const saved = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+    try {
+      process.env.GOOGLE_APPLICATION_CREDENTIALS = "/nonexistent/definitely-not-a-credential.json";
+      const fresh = xaiVertexProviderConfig("proj");
+      const result = await fresh.auth.apiKey.check();
+      if (result === undefined && lines.length > 0) {
+        assert.match(lines.join("\n"), /xai-vertex/, "the warning names the provider");
+        assert.match(lines.join("\n"), /ADC|credential/i, "the warning names the cause");
+      }
+    } finally {
+      console.error = original;
+      if (saved === undefined) delete process.env.GOOGLE_APPLICATION_CREDENTIALS;
+      else process.env.GOOGLE_APPLICATION_CREDENTIALS = saved;
+    }
   });
 });
 
