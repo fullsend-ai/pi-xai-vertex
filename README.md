@@ -53,8 +53,8 @@ Roughly, against Claude Sonnet 5 ($2 / $10, cache read $0.20, no long-context pr
 ## Using alongside other Vertex providers
 
 pi can serve models from multiple Vertex AI providers and multiple GCP projects in a single session.
-Each provider resolves its project from its own environment variable, so Grok can run from one
-project while Claude or Gemini run from another — important in practice because model availability
+Each provider has its own resolution order; only this one puts its own variable first, so Grok can
+run from a different project than Claude or Gemini — important in practice because model availability
 in Vertex Model Garden is per-project.
 
 ### Environment variables are independent
@@ -62,11 +62,16 @@ in Vertex Model Garden is per-project.
 | Provider | Project variable | Location | Notes |
 |---|---|---|---|
 | `xai-vertex` (this) | `XAI_VERTEX_PROJECT_ID`, then `GOOGLE_CLOUD_PROJECT`, then `ANTHROPIC_VERTEX_PROJECT_ID` | fixed `global` | not configurable — Vertex serves Grok only on the global endpoint |
-| `anthropic-vertex` | `ANTHROPIC_VERTEX_PROJECT_ID` (among others) | `CLOUD_ML_REGION` | separate extension, see [twoGiants/pi-anthropic-vertex](https://github.com/twoGiants/pi-anthropic-vertex) |
+| `anthropic-vertex` | `GOOGLE_CLOUD_PROJECT`, then `GCLOUD_PROJECT`, then `ANTHROPIC_VERTEX_PROJECT_ID`, then `GOOGLE_CLOUD_PROJECT_ID` | `CLOUD_ML_REGION`, then `GOOGLE_CLOUD_LOCATION` (default `us-east5`) | separate extension, see [twoGiants/pi-anthropic-vertex](https://github.com/twoGiants/pi-anthropic-vertex) |
 | `google-vertex` (built in) | `GOOGLE_CLOUD_PROJECT` | `GOOGLE_CLOUD_LOCATION` | **both required** |
 
 All three use ADC for credentials (`gcloud auth application-default login`), so one login covers
 every provider even across projects — it is the *project* that differs, not the identity.
+
+Because Claude reads `GOOGLE_CLOUD_PROJECT` first and `google-vertex` requires that same variable,
+Claude and Gemini cannot be split across projects by setting `ANTHROPIC_VERTEX_PROJECT_ID` alone —
+that variable only wins when `GOOGLE_CLOUD_PROJECT` is unset. Only `xai-vertex` has a variable that
+is truly its own (`XAI_VERTEX_PROJECT_ID` is read first).
 
 See [Requirements](#requirements) below for this provider's project fallback order and
 [Install](#install) for the ADC setup.
@@ -78,8 +83,8 @@ See [Requirements](#requirements) below for this provider's project fallback ord
 export XAI_VERTEX_PROJECT_ID=my-grok-project
 export ANTHROPIC_VERTEX_PROJECT_ID=my-models-project
 export GOOGLE_CLOUD_PROJECT=my-models-project
-export GOOGLE_CLOUD_LOCATION=us-central1
-export CLOUD_ML_REGION=us-central1
+export GOOGLE_CLOUD_LOCATION=global  # xai-vertex ignores both location variables (Grok is served only on global)
+export CLOUD_ML_REGION=global
 
 gcloud auth application-default login
 
@@ -111,8 +116,7 @@ Use the three-segment form in scripts: `xai-vertex/xai/grok-4.6`, `google-vertex
 ### google-vertex requires both project and location
 
 `google-vertex` needs `GOOGLE_CLOUD_PROJECT` *and* `GOOGLE_CLOUD_LOCATION`. With either missing it
-fails with a generic `Use /login to log into a provider`, naming neither variable. This provider
-registers nothing when unconfigured and, since v0.2.0, prints the specific cause.
+fails with a generic `Use /login to log into a provider`, naming neither variable.
 
 ### How to tell which model actually answered
 
@@ -124,6 +128,16 @@ cheapest first:
 - The session JSONL records `model_change` events and per-message `provider` / `model` / `api`
 - `responseId` is server-generated (`msg_vrtx_…` is Anthropic-on-Vertex)
 - Cost arithmetic discriminates: Grok bills output at $6/M with no cache-write charge
+
+### In fullsend
+
+Per-agent selection is an `agents:` entry in `.fullsend/config.yaml`, e.g. `agents: [{name: triage,
+model: xai-vertex/xai/grok-4.6}]`, or `fullsend agent set triage --fullsend-dir .fullsend --runtime
+pi --model xai-vertex/xai/grok-4.6`. A pi run leaves an explicitly set `XAI_VERTEX_PROJECT_ID` alone
+and only defaults it to `ANTHROPIC_VERTEX_PROJECT_ID`, then `GOOGLE_CLOUD_PROJECT`, so Grok can live
+in a different project from the fleet's Claude project. See the
+[pi runtime docs](https://github.com/fullsend-ai/fullsend/blob/main/docs/runtimes/pi.md) for the
+full precedence.
 
 ## Requirements
 
