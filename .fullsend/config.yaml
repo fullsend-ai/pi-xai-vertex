@@ -8,6 +8,10 @@
 # (default when unset) or pi. For one run, the 'fullsend run --runtime'
 # flag wins, then FULLSEND_RUNTIME, then this file. See docs/runtimes.md.
 version: "1"
+# Per-agent settings live on the agents list below: triage and review run Grok on pi,
+# prioritize runs Gemini on pi, and code/fix/retro run Claude Code (Sonnet). The repo-wide
+# runtime key stays pi as the default for any agent that sets none. Change one agent with
+# `fullsend agent set <name> --fullsend-dir .fullsend --runtime ... --model ...`.
 runtime: pi
 roles:
     - triage
@@ -16,6 +20,22 @@ roles:
     - fix
     - retro
     - prioritize
+agents:
+    - name: triage
+      model: xai-vertex/xai/grok-4.6
+    - name: review
+      model: xai-vertex/xai/grok-4.6
+    - name: prioritize
+      model: google-vertex/gemini-3.7-flash
+    - name: code
+      runtime: claude
+      model: sonnet
+    - name: fix
+      runtime: claude
+      model: sonnet
+    - name: retro
+      runtime: claude
+      model: sonnet
 allowed_remote_resources:
     - https://raw.githubusercontent.com/fullsend-ai/fullsend/
     - https://raw.githubusercontent.com/fullsend-ai/agents/
