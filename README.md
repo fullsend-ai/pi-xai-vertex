@@ -111,7 +111,7 @@ Bare model ids are ambiguous and produce confusing failures:
   `API_KEY_INVALID` against `generativelanguage.googleapis.com`) and `google-vertex` (ADC). A stale
   or absent key sends you debugging a path unrelated to Vertex.
 
-Use the three-segment form in scripts: `xai-vertex/xai/grok-4.6`, `google-vertex/gemini-3.7-flash`.
+Use the fully qualified `provider/model` form in scripts: `xai-vertex/xai/grok-4.6` (three segments, because this provider's model id carries the `xai/` publisher prefix) and `google-vertex/gemini-3.7-flash`.
 
 ### google-vertex requires both project and location
 
