@@ -36,6 +36,11 @@ agents:
     - name: retro
       runtime: claude
       model: sonnet
+# Claude Code resolves the bare `sonnet` alias to claude-sonnet-4-5 on Vertex; this project serves
+# claude-sonnet-5, so point the alias there for code/fix/retro (and for any pi run that uses it).
+models:
+    aliases:
+        sonnet: claude-sonnet-5
 allowed_remote_resources:
     - https://raw.githubusercontent.com/fullsend-ai/fullsend/
     - https://raw.githubusercontent.com/fullsend-ai/agents/
