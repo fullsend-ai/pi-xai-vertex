@@ -132,6 +132,99 @@ export const PROVIDER_ID = "xai-vertex";
 export const MODEL_ID = "xai/grok-4.6";
 
 /**
+ * Creates a TransformStream that filters out Vertex AI keepalive frames from SSE streams.
+ *
+ * The Vertex partner-model endpoint sends keepalives as `data: : keepalive\n\n` (an SSE data event
+ * whose payload is `: keepalive`). The OpenAI SDK's SSE decoder drops SSE *comment* lines
+ * (`: keepalive`) but JSON.parse()s every `data:` line's payload, so these keepalives abort the
+ * stream with "Unexpected token ':'". This transform drops such lines (including their trailing
+ * empty line separator) before the SDK sees them.
+ */
+export function createKeepaliveFilterTransform(): TransformStream<Uint8Array, Uint8Array> {
+  const decoder = new TextDecoder();
+  const encoder = new TextEncoder();
+  let buffer = "";
+
+  return new TransformStream({
+    transform(chunk, controller) {
+      // Append the new chunk to any buffered partial line from the previous chunk
+      buffer += decoder.decode(chunk, { stream: true });
+
+      // Split on newlines but keep the delimiters so we can reconstruct the stream
+      const lines = buffer.split("\n");
+
+      // Keep the last (potentially incomplete) line in the buffer
+      buffer = lines.pop() || "";
+
+      // Process complete lines, filtering out keepalive events
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        // Drop lines that are SSE data events with a keepalive payload
+        // Match: "data: : keepalive" (with optional trailing \r)
+        if (/^data:\s*:\s*keepalive\s*\r?$/.test(line)) {
+          // Also skip the next line if it's empty (the SSE event separator)
+          if (i + 1 < lines.length && lines[i + 1].trim() === "") {
+            i++; // Skip the empty line that follows
+          }
+          continue; // Skip the keepalive line itself
+        }
+        // Emit the line with its trailing newline
+        controller.enqueue(encoder.encode(line + "\n"));
+      }
+    },
+    flush(controller) {
+      // Emit any remaining buffered content
+      if (buffer.length > 0) {
+        // Check if the final buffer is a keepalive line
+        if (!/^data:\s*:\s*keepalive\s*\r?$/.test(buffer)) {
+          controller.enqueue(encoder.encode(buffer));
+        }
+      }
+    },
+  });
+}
+
+/**
+ * Wraps the global fetch to filter Vertex AI keepalive frames from streaming responses.
+ */
+export function createKeepaliveFilteringFetch(baseFetch: typeof fetch = fetch): typeof fetch {
+  return async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const response = await baseFetch(input, init);
+
+    // Only transform streaming responses
+    if (!response.body) {
+      return response;
+    }
+
+    // Pipe the response body through the keepalive filter
+    const filteredBody = response.body.pipeThrough(createKeepaliveFilterTransform());
+
+    // Return a new Response with the filtered body
+    return new Response(filteredBody, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers,
+    });
+  };
+}
+
+/**
+ * Wraps a ProviderStreams API to inject a custom fetch into all stream calls.
+ */
+function wrapApiWithFetch(baseApi: ReturnType<typeof openAICompletionsApi>, customFetch: typeof fetch) {
+  return {
+    stream(model: Parameters<typeof baseApi.stream>[0], context: Parameters<typeof baseApi.stream>[1], options?: Parameters<typeof baseApi.stream>[2]) {
+      return baseApi.stream(model, context, { ...options, fetch: customFetch });
+    },
+    streamSimple(model: Parameters<typeof baseApi.streamSimple>[0], context: Parameters<typeof baseApi.streamSimple>[1], options?: Parameters<typeof baseApi.streamSimple>[2]) {
+      return baseApi.streamSimple(model, context, { ...options, fetch: customFetch });
+    },
+    fetchDeferred: baseApi.fetchDeferred,
+    cancelDeferred: baseApi.cancelDeferred,
+  };
+}
+
+/**
  * The provider config pi registers. Built separately from the extension entry point so it can be
  * asserted without a live pi — every field below is required by pi's model resolution, and omitting
  * any one of them throws inside resolveCliModel and breaks *every* registered provider, not just
@@ -180,7 +273,7 @@ export function xaiVertexProviderConfig(project: string) {
       },
     },
     models: [model],
-    api: openAICompletionsApi(),
+    api: wrapApiWithFetch(openAICompletionsApi(), createKeepaliveFilteringFetch()),
   };
 }
 
