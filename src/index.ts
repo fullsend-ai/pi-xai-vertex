@@ -52,7 +52,7 @@
 // declarations are the accurate ones.
 import { createProvider } from "@earendil-works/pi-ai";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/compat";
-import type { AuthResult, Model, ModelCost } from "@earendil-works/pi-ai";
+import type { AuthResult, Model, ModelCost, ProviderStreams } from "@earendil-works/pi-ai";
 import { getAgentDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -132,95 +132,133 @@ export const PROVIDER_ID = "xai-vertex";
 export const MODEL_ID = "xai/grok-4.6";
 
 /**
- * Creates a TransformStream that filters out Vertex AI keepalive frames from SSE streams.
+ * A `data:` line whose payload is comment-shaped (starts with `:`), the form Vertex uses for its
+ * keepalive frames. Matched on the payload's leading colon rather than the word `keepalive` (issue
+ * #5's rule): a JSON payload or the `[DONE]` sentinel never starts with `:`, so this drops nothing
+ * legitimate, and it keeps working if Vertex renames the frame (`: ping`, `: keep-alive 42`).
+ */
+const COMMENT_SHAPED_DATA_LINE = /^data:\s*:/;
+
+/**
+ * Creates a TransformStream that filters Vertex AI keepalive frames out of an SSE body.
  *
- * The Vertex partner-model endpoint sends keepalives as `data: : keepalive\n\n` (an SSE data event
- * whose payload is `: keepalive`). The OpenAI SDK's SSE decoder drops SSE *comment* lines
- * (`: keepalive`) but JSON.parse()s every `data:` line's payload, so these keepalives abort the
- * stream with "Unexpected token ':'". This transform drops such lines (including their trailing
- * empty line separator) before the SDK sees them.
+ * The Vertex partner-model endpoint sends keepalives as `data: : keepalive` — an SSE *data* event
+ * whose payload is `: keepalive`. The OpenAI SDK's SSE decoder drops SSE comment lines
+ * (`: keepalive`) but JSON.parse()s every `data:` payload, so these keepalives abort the stream
+ * with "Unexpected token ':'". This transform works one SSE event at a time: comment-shaped
+ * `data:` lines are removed, and an event left with no `data:` line at all is dropped whole — its
+ * other field lines and its terminating blank line included, since an event without data would
+ * make the decoder parse an empty payload. Everything else passes through byte for byte, each
+ * line with its own terminator (`\r\n`, `\r` or `\n`), whatever the chunking. Written for a
+ * trusted SSE source: an event is buffered until its blank line arrives, and one terminator style
+ * per event is assumed (removing a line makes two terminators adjacent, and the SDK only splits
+ * events on a doubled `\n`, `\r` or `\r\n`). Vertex sends the keepalive as a standalone,
+ * `\n`-terminated event (captured 2026-09-04).
  */
 export function createKeepaliveFilterTransform(): TransformStream<Uint8Array, Uint8Array> {
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
   let buffer = "";
+  // The current event's lines (terminators included) minus any comment-shaped data lines, and
+  // whether one of those was removed from it.
+  let eventLines: string[] = [];
+  let droppedKeepalive = false;
+
+  const endEvent = (controller: TransformStreamDefaultController<Uint8Array>, blankLine: string) => {
+    const hasData = eventLines.some((line) => line.startsWith("data:"));
+    if (hasData || !droppedKeepalive) {
+      controller.enqueue(encoder.encode(eventLines.join("") + blankLine));
+    }
+    eventLines = [];
+    droppedKeepalive = false;
+  };
+
+  const handleLine = (controller: TransformStreamDefaultController<Uint8Array>, line: string, terminator: string) => {
+    if (line === "") {
+      endEvent(controller, terminator);
+    } else if (COMMENT_SHAPED_DATA_LINE.test(line)) {
+      droppedKeepalive = true;
+    } else {
+      eventLines.push(line + terminator);
+    }
+  };
+
+  const drain = (controller: TransformStreamDefaultController<Uint8Array>, final: boolean) => {
+    // SSE line terminators, the three the OpenAI SDK's own LineDecoder accepts. A fresh regex per
+    // drain, so no `lastIndex` is shared between transforms.
+    const terminator = /\r\n|\r|\n/g;
+    let start = 0;
+    for (let match = terminator.exec(buffer); match !== null; match = terminator.exec(buffer)) {
+      const end = match.index + match[0].length;
+      // A lone `\r` at the very end may be the first half of a `\r\n` split across chunks.
+      if (!final && match[0] === "\r" && end === buffer.length) break;
+      handleLine(controller, buffer.slice(start, match.index), match[0]);
+      start = end;
+    }
+    buffer = buffer.slice(start);
+    if (final) {
+      if (buffer.length > 0) handleLine(controller, buffer, "");
+      buffer = "";
+      // A stream that ends mid-event: finish the event as if its blank line had arrived, minus
+      // the blank line, so the same drop rule applies.
+      if (eventLines.length > 0 || droppedKeepalive) endEvent(controller, "");
+    }
+  };
 
   return new TransformStream({
     transform(chunk, controller) {
-      // Append the new chunk to any buffered partial line from the previous chunk
       buffer += decoder.decode(chunk, { stream: true });
-
-      // Split on newlines but keep the delimiters so we can reconstruct the stream
-      const lines = buffer.split("\n");
-
-      // Keep the last (potentially incomplete) line in the buffer
-      buffer = lines.pop() || "";
-
-      // Process complete lines, filtering out keepalive events
-      for (let i = 0; i < lines.length; i++) {
-        const line = lines[i];
-        // Drop lines that are SSE data events with a keepalive payload
-        // Match: "data: : keepalive" (with optional trailing \r)
-        if (/^data:\s*:\s*keepalive\s*\r?$/.test(line)) {
-          // Also skip the next line if it's empty (the SSE event separator)
-          if (i + 1 < lines.length && lines[i + 1].trim() === "") {
-            i++; // Skip the empty line that follows
-          }
-          continue; // Skip the keepalive line itself
-        }
-        // Emit the line with its trailing newline
-        controller.enqueue(encoder.encode(line + "\n"));
-      }
+      drain(controller, false);
     },
     flush(controller) {
-      // Emit any remaining buffered content
-      if (buffer.length > 0) {
-        // Check if the final buffer is a keepalive line
-        if (!/^data:\s*:\s*keepalive\s*\r?$/.test(buffer)) {
-          controller.enqueue(encoder.encode(buffer));
-        }
-      }
+      buffer += decoder.decode();
+      drain(controller, true);
     },
   });
 }
 
 /**
- * Wraps the global fetch to filter Vertex AI keepalive frames from streaming responses.
+ * Wraps a fetch so that `text/event-stream` responses are filtered through
+ * {@link createKeepaliveFilterTransform}. Every other response is returned untouched. The base
+ * fetch is resolved per call, so a fetch pi installs after this extension loads is still the one
+ * used. The rebuilt Response keeps status, statusText and headers (minus the length and encoding of
+ * the original body); `url`, `redirected` and `type` cannot be set on a constructed Response, and
+ * the OpenAI SDK reads `url` only for debug logging.
  */
-export function createKeepaliveFilteringFetch(baseFetch: typeof fetch = fetch): typeof fetch {
-  return async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-    const response = await baseFetch(input, init);
-
-    // Only transform streaming responses
-    if (!response.body) {
-      return response;
-    }
-
-    // Pipe the response body through the keepalive filter
-    const filteredBody = response.body.pipeThrough(createKeepaliveFilterTransform());
-
-    // Return a new Response with the filtered body
-    return new Response(filteredBody, {
+export function createKeepaliveFilteringFetch(baseFetch?: typeof fetch): typeof fetch {
+  return async (input, init) => {
+    const response = await (baseFetch ?? globalThis.fetch)(input, init);
+    // Vertex answers a streamed completion with `content-type: text/event-stream` (captured
+    // 2026-09-04: no charset, HTTP/2, no content-length). Anything else — a JSON error body, say —
+    // is returned untouched.
+    const mediaType = (response.headers.get("content-type") ?? "").split(";")[0].trim().toLowerCase();
+    if (!response.body || mediaType !== "text/event-stream") return response;
+    // The filtered body is shorter than the original and no longer framed or encoded the way the
+    // wire was.
+    const headers = new Headers(response.headers);
+    for (const name of ["content-length", "content-encoding", "transfer-encoding"]) headers.delete(name);
+    return new Response(response.body.pipeThrough(createKeepaliveFilterTransform()), {
       status: response.status,
       statusText: response.statusText,
-      headers: response.headers,
+      headers,
     });
   };
 }
 
 /**
- * Wraps a ProviderStreams API to inject a custom fetch into all stream calls.
+ * The openai-completions API with the keepalive filter composed onto every stream call's fetch —
+ * on top of a caller-supplied `options.fetch` when there is one, on `globalThis.fetch` otherwise.
+ * Spread first so any member pi adds to `ProviderStreams` later still passes through.
  */
-function wrapApiWithFetch(baseApi: ReturnType<typeof openAICompletionsApi>, customFetch: typeof fetch) {
+export function wrapApiWithFetch(baseApi: ProviderStreams): ProviderStreams {
   return {
-    stream(model: Parameters<typeof baseApi.stream>[0], context: Parameters<typeof baseApi.stream>[1], options?: Parameters<typeof baseApi.stream>[2]) {
-      return baseApi.stream(model, context, { ...options, fetch: customFetch });
+    ...baseApi,
+    stream(model, context, options) {
+      return baseApi.stream(model, context, { ...options, fetch: createKeepaliveFilteringFetch(options?.fetch) });
     },
-    streamSimple(model: Parameters<typeof baseApi.streamSimple>[0], context: Parameters<typeof baseApi.streamSimple>[1], options?: Parameters<typeof baseApi.streamSimple>[2]) {
-      return baseApi.streamSimple(model, context, { ...options, fetch: customFetch });
+    streamSimple(model, context, options) {
+      return baseApi.streamSimple(model, context, { ...options, fetch: createKeepaliveFilteringFetch(options?.fetch) });
     },
-    fetchDeferred: baseApi.fetchDeferred,
-    cancelDeferred: baseApi.cancelDeferred,
   };
 }
 
@@ -273,7 +311,7 @@ export function xaiVertexProviderConfig(project: string) {
       },
     },
     models: [model],
-    api: wrapApiWithFetch(openAICompletionsApi(), createKeepaliveFilteringFetch()),
+    api: wrapApiWithFetch(openAICompletionsApi()),
   };
 }
 

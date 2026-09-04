@@ -1,7 +1,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { calculateCost, createProvider } from "@earendil-works/pi-ai";
-import type { Usage } from "@earendil-works/pi-ai";
+import { openAICompletionsApi } from "@earendil-works/pi-ai/compat";
+import type { ProviderStreams, Usage } from "@earendil-works/pi-ai";
 import {
   GROK_4_6_COST,
   MODEL_ID,
@@ -14,6 +15,7 @@ import {
   xaiVertexProviderConfig,
   createKeepaliveFilterTransform,
   createKeepaliveFilteringFetch,
+  wrapApiWithFetch,
 } from "./index.ts";
 
 describe("resolveProject", () => {
@@ -326,165 +328,328 @@ describe("cost through pi's own engine", () => {
 });
 
 describe("createKeepaliveFilterTransform", () => {
-  async function transformText(input: string): Promise<string> {
-    const encoder = new TextEncoder();
-    const decoder = new TextDecoder();
-    const stream = new ReadableStream({
+  const encoder = new TextEncoder();
+  const decoder = new TextDecoder();
+
+  /** Runs the given byte chunks through the transform and returns the output as text. */
+  async function transformChunks(chunks: Uint8Array[]): Promise<string> {
+    const stream = new ReadableStream<Uint8Array>({
       start(controller) {
-        controller.enqueue(encoder.encode(input));
+        for (const chunk of chunks) controller.enqueue(chunk);
         controller.close();
       },
     });
-
-    const transformed = stream.pipeThrough(createKeepaliveFilterTransform());
-    const reader = transformed.getReader();
+    const reader = stream.pipeThrough(createKeepaliveFilterTransform()).getReader();
     let result = "";
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
       result += decoder.decode(value, { stream: true });
     }
-    result += decoder.decode(); // flush
-    return result;
+    return result + decoder.decode();
   }
 
+  const transformText = (...chunks: string[]) => transformChunks(chunks.map((c) => encoder.encode(c)));
+
   it("drops data lines with keepalive payloads", async () => {
-    const input = "data: : keepalive\n\n";
-    const output = await transformText(input);
-    assert.equal(output, "");
+    assert.equal(await transformText("data: : keepalive\n\n"), "");
   });
 
   it("preserves normal SSE data lines", async () => {
     const input = 'data: {"content":"hello"}\n\n';
-    const output = await transformText(input);
-    assert.equal(output, input);
+    assert.equal(await transformText(input), input);
   });
 
-  it("filters keepalives while preserving real data", async () => {
-    const input =
-      'data: {"delta":"start"}\n\n' +
-      "data: : keepalive\n\n" +
-      'data: {"delta":"end"}\n\n';
-    const expected =
-      'data: {"delta":"start"}\n\n' +
-      'data: {"delta":"end"}\n\n';
-    const output = await transformText(input);
-    assert.equal(output, expected);
+  it("filters keepalives while preserving real data byte for byte", async () => {
+    const input = 'data: {"delta":"start"}\n\n' + "data: : keepalive\n\n" + 'data: {"delta":"end"}\n\n';
+    assert.equal(await transformText(input), 'data: {"delta":"start"}\n\n' + 'data: {"delta":"end"}\n\n');
   });
 
-  it("handles keepalive with varying whitespace", async () => {
+  it("handles keepalive with varying whitespace and every SSE line terminator", async () => {
     const variations = [
       "data: : keepalive\n",
       "data:  :  keepalive\n",
       "data: : keepalive  \n",
       "data: : keepalive\r\n",
+      "data: : keepalive\r\n\r\n",
+      "data: : keepalive\r\r",
+      "data:: keepalive\n\n",
     ];
     for (const input of variations) {
-      const output = await transformText(input);
-      assert.equal(output, "", `should filter: ${JSON.stringify(input)}`);
+      assert.equal(await transformText(input), "", `should filter: ${JSON.stringify(input)}`);
     }
+  });
+
+  it("drops any comment-shaped data payload, not just the word keepalive", async () => {
+    assert.equal(await transformText("data: : ping\n\n"), "");
+    assert.equal(await transformText("data: : keep-alive 42\n\n"), "");
+  });
+
+  it("keeps data payloads that merely contain a colon", async () => {
+    const input = 'data: {"text":": not a comment"}\n\n' + "data: [DONE]\n\n";
+    assert.equal(await transformText(input), input);
+  });
+
+  it("keeps the [DONE] sentinel intact after a keepalive", async () => {
+    assert.equal(await transformText("data: : keepalive\n\ndata: [DONE]\n\n"), "data: [DONE]\n\n");
   });
 
   it("preserves SSE comment lines", async () => {
     const input = ": this is a comment\n\n";
-    const output = await transformText(input);
-    assert.equal(output, input);
+    assert.equal(await transformText(input), input);
   });
 
   it("preserves event type lines", async () => {
     const input = "event: message\ndata: content\n\n";
-    const output = await transformText(input);
-    assert.equal(output, input);
+    assert.equal(await transformText(input), input);
   });
 
   it("handles chunks split mid-line", async () => {
-    const encoder = new TextEncoder();
-    const decoder = new TextDecoder();
-    const stream = new ReadableStream({
-      start(controller) {
-        // Send "data: : keep" then "alive\n\n" as separate chunks
-        controller.enqueue(encoder.encode("data: : keep"));
-        controller.enqueue(encoder.encode("alive\n\n"));
-        controller.close();
-      },
-    });
+    assert.equal(await transformText("data: : keep", "alive\n\n"), "");
+  });
 
-    const transformed = stream.pipeThrough(createKeepaliveFilterTransform());
-    const reader = transformed.getReader();
-    let result = "";
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      result += decoder.decode(value, { stream: true });
-    }
-    result += decoder.decode();
-    assert.equal(result, "", "should filter keepalive even when split across chunks");
+  it("drops the event separator when it arrives in a later chunk", async () => {
+    assert.equal(await transformText("data: : keepalive\n", "\n", 'data: {"a":1}\n\n'), 'data: {"a":1}\n\n');
+    assert.equal(await transformText("data: : keepalive", "\n", "\n"), "");
+  });
+
+  it("keeps the rest of an event that also carried a keepalive line", async () => {
+    assert.equal(
+      await transformText('data: {"a":1}\ndata: : keepalive\n\n', 'data: {"b":2}\n\n'),
+      'data: {"a":1}\n\n' + 'data: {"b":2}\n\n',
+    );
+  });
+
+  it("drops an event whose only data line was a keepalive, field lines included", async () => {
+    assert.equal(await transformText("event: ping\ndata: : keepalive\n\n", 'data: {"b":2}\n\n'), 'data: {"b":2}\n\n');
+    assert.equal(await transformText("id: 7\r\ndata: : keepalive\r\n\r\n"), "");
+  });
+
+  it("keeps blank lines that are not a dropped event's terminator", async () => {
+    assert.equal(await transformText("\n\ndata: x\n\n\n"), "\n\ndata: x\n\n\n");
+    assert.equal(await transformText("data: : keepalive\n\n\n"), "\n");
+  });
+
+  it("does not split a CRLF terminator that straddles two chunks", async () => {
+    assert.equal(await transformText("data: x\r", "\ndata: y\r\n"), "data: x\r\ndata: y\r\n");
+    assert.equal(await transformText("data: : keepalive\r", "\n\r\ndata: y\r\n"), "data: y\r\n");
+  });
+
+  it("handles the end of the stream", async () => {
+    // An unterminated final event is emitted as-is, minus any keepalive line.
+    assert.equal(await transformText('data: {"a":1}'), 'data: {"a":1}');
+    assert.equal(await transformText('event: m\ndata: {"a":1}'), 'event: m\ndata: {"a":1}');
+    assert.equal(await transformText('data: {"a":1}\n\ndata: : keepalive'), 'data: {"a":1}\n\n');
+    // ...and a keepalive-only event that is cut off before its blank line is dropped whole.
+    assert.equal(await transformText("event: ping\ndata: : keepalive"), "");
+    assert.equal(await transformText('data: {"a":1}\n\nid: 7\ndata: : keepalive\n'), 'data: {"a":1}\n\n');
+    // A trailing lone CR is a terminator once the stream ends.
+    assert.equal(await transformText("data: x\r"), "data: x\r");
+  });
+
+  it("keeps a multi-byte character that straddles two chunks", async () => {
+    const bytes = encoder.encode("data: caf\u00e9\n\n");
+    const cut = bytes.indexOf(0xc3) + 1; // split inside the two-byte sequence for \u00e9
+    assert.equal(await transformChunks([bytes.slice(0, cut), bytes.slice(cut)]), "data: caf\u00e9\n\n");
   });
 });
 
 describe("createKeepaliveFilteringFetch", () => {
-  it("passes through non-streaming responses unchanged", async () => {
-    const mockFetch = async () =>
-      new Response("plain text", {
-        status: 200,
-        statusText: "OK",
-        headers: { "content-type": "text/plain" },
-      });
+  const encoder = new TextEncoder();
 
-    const wrappedFetch = createKeepaliveFilteringFetch(mockFetch as typeof fetch);
-    const response = await wrappedFetch("http://example.com");
+  function sseResponse(chunks: string[], init: ResponseInit = {}): Response {
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const chunk of chunks) controller.enqueue(encoder.encode(chunk));
+        controller.close();
+      },
+    });
+    return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" }, ...init });
+  }
 
-    assert.equal(response.status, 200);
-    assert.equal(response.statusText, "OK");
+  it("returns non-SSE responses untouched", async () => {
+    const original = new Response("plain text", { status: 200, statusText: "OK", headers: { "content-type": "text/plain" } });
+    const mockFetch: typeof fetch = async () => original;
+
+    const response = await createKeepaliveFilteringFetch(mockFetch)("http://example.com");
+
+    assert.equal(response, original);
     assert.equal(await response.text(), "plain text");
   });
 
-  it("filters keepalive frames from streaming responses", async () => {
-    const encoder = new TextEncoder();
-    const mockFetch = async () => {
-      const stream = new ReadableStream({
-        start(controller) {
-          controller.enqueue(encoder.encode('data: {"chunk":1}\n\n'));
-          controller.enqueue(encoder.encode("data: : keepalive\n\n"));
-          controller.enqueue(encoder.encode('data: {"chunk":2}\n\n'));
-          controller.close();
+  it("filters keepalive frames from event streams byte for byte", async () => {
+    const mockFetch: typeof fetch = async () =>
+      sseResponse(['data: {"chunk":1}\n\n', "data: : keepalive\n\n", 'data: {"chunk":2}\n\n']);
+
+    const response = await createKeepaliveFilteringFetch(mockFetch)("http://example.com");
+
+    assert.equal(await response.text(), 'data: {"chunk":1}\n\n' + 'data: {"chunk":2}\n\n');
+  });
+
+  it("filters only bodies whose media type is text/event-stream", async () => {
+    const keepaliveOnly = ["data: : keepalive\n\n"];
+    for (const contentType of ["text/event-stream", "text/event-stream; charset=utf-8", "TEXT/EVENT-STREAM"]) {
+      const mockFetch: typeof fetch = async () => sseResponse(keepaliveOnly, { headers: { "content-type": contentType } });
+      const response = await createKeepaliveFilteringFetch(mockFetch)("http://example.com");
+      assert.equal(await response.text(), "", `should filter with content-type ${contentType}`);
+    }
+    const others: Record<string, string>[] = [{ "content-type": "application/json" }, { "content-type": "text/event-streamy" }, {}];
+    for (const headers of others) {
+      const other = new Response("data: : keepalive\n\n", { headers });
+      const mockFetch: typeof fetch = async () => other;
+      assert.equal(await createKeepaliveFilteringFetch(mockFetch)("http://example.com"), other, JSON.stringify(headers));
+    }
+  });
+
+  it("drops the original body's length and encoding headers", async () => {
+    const mockFetch: typeof fetch = async () =>
+      sseResponse(["data: : keepalive\n\n"], {
+        headers: {
+          "content-type": "text/event-stream",
+          "content-length": "20",
+          "content-encoding": "identity",
+          "transfer-encoding": "chunked",
+          "x-keep": "1",
         },
       });
-      return new Response(stream, {
-        status: 200,
-        headers: { "content-type": "text/event-stream" },
-      });
-    };
-
-    const wrappedFetch = createKeepaliveFilteringFetch(mockFetch as typeof fetch);
-    const response = await wrappedFetch("http://example.com");
-    const text = await response.text();
-
-    assert.ok(text.includes('{"chunk":1}'), "should include first chunk");
-    assert.ok(text.includes('{"chunk":2}'), "should include second chunk");
-    assert.ok(!text.includes("keepalive"), "should filter out keepalive");
+    const response = await createKeepaliveFilteringFetch(mockFetch)("http://example.com");
+    assert.equal(response.headers.get("content-length"), null);
+    assert.equal(response.headers.get("content-encoding"), null);
+    assert.equal(response.headers.get("transfer-encoding"), null);
+    assert.equal(response.headers.get("x-keep"), "1");
   });
 
   it("preserves response status and headers", async () => {
-    const mockFetch = async () =>
-      new Response(
-        new ReadableStream({
-          start(controller) {
-            controller.close();
-          },
-        }),
-        {
-          status: 201,
-          statusText: "Created",
-          headers: { "x-custom": "value" },
-        },
-      );
+    const mockFetch: typeof fetch = async () =>
+      sseResponse([], { status: 201, statusText: "Created", headers: { "content-type": "text/event-stream", "x-custom": "value" } });
 
-    const wrappedFetch = createKeepaliveFilteringFetch(mockFetch as typeof fetch);
-    const response = await wrappedFetch("http://example.com");
+    const response = await createKeepaliveFilteringFetch(mockFetch)("http://example.com");
 
     assert.equal(response.status, 201);
     assert.equal(response.statusText, "Created");
     assert.equal(response.headers.get("x-custom"), "value");
+  });
+
+  it("forwards the request and resolves globalThis.fetch per call", async () => {
+    const calls: { input: RequestInfo | URL; init: RequestInit | undefined }[] = [];
+    const originalFetch = globalThis.fetch;
+    const wrapped = createKeepaliveFilteringFetch(); // created before the global is swapped
+    try {
+      globalThis.fetch = async (input, init) => {
+        calls.push({ input, init });
+        return sseResponse(["data: : keepalive\n\n"]);
+      };
+      const signal = new AbortController().signal;
+      const response = await wrapped("http://127.0.0.1:9/stream", { method: "POST", signal });
+      assert.equal(await response.text(), "");
+      assert.equal(calls.length, 1);
+      assert.equal(calls[0].input, "http://127.0.0.1:9/stream");
+      assert.equal(calls[0].init?.method, "POST");
+      assert.equal(calls[0].init?.signal, signal);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
+
+describe("the provider's api", () => {
+  const encoder = new TextEncoder();
+
+  /** An OpenAI chat-completions chunk stream for the given words, with a keepalive before each. */
+  function completionStream(words: string[]): Response {
+    const chunk = (delta: object, finish: string | null) =>
+      `data: ${JSON.stringify({ id: "c", object: "chat.completion.chunk", created: 0, model: MODEL_ID, choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`;
+    const frames: string[] = [];
+    for (const word of words) {
+      frames.push("data: : keepalive\n\n", chunk({ role: "assistant", content: word }, null));
+    }
+    frames.push("data: : keepalive\n\n", chunk({}, "stop"), "data: [DONE]\n\n");
+    return new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (const frame of frames) controller.enqueue(encoder.encode(frame));
+          controller.close();
+        },
+      }),
+      { status: 200, headers: { "content-type": "text/event-stream" } },
+    );
+  }
+
+  it("streams through pi's openai-completions adapter with a caller-supplied fetch composed in", async () => {
+    const config = xaiVertexProviderConfig("proj");
+    const urls: string[] = [];
+    const callerFetch: typeof fetch = async (input) => {
+      urls.push(input instanceof Request ? input.url : String(input));
+      return completionStream(["Hello", " world"]);
+    };
+
+    const message = await config.api
+      .streamSimple(
+        config.models[0],
+        { messages: [{ role: "user", content: "hi", timestamp: Date.now() }] },
+        { apiKey: "tok", fetch: callerFetch },
+      )
+      .result();
+
+    assert.equal(message.stopReason, "stop");
+    assert.deepEqual(message.content, [{ type: "text", text: "Hello world" }]);
+    assert.equal(urls.length, 1, "the caller's fetch is the one invoked, with the filter on top");
+    assert.ok(urls[0].startsWith(buildBaseUrl("proj")), urls[0]);
+  });
+
+  it("is needed: the unwrapped adapter dies on the captured keepalive frame", async () => {
+    const config = xaiVertexProviderConfig("proj");
+    const rawFetch: typeof fetch = async () => completionStream(["Hello"]);
+
+    const message = await openAICompletionsApi()
+      .streamSimple(
+        config.models[0],
+        { messages: [{ role: "user", content: "hi", timestamp: Date.now() }] },
+        { apiKey: "tok", fetch: rawFetch },
+      )
+      .result();
+
+    assert.equal(message.stopReason, "error");
+    assert.match(message.errorMessage ?? "", /keepalive/);
+  });
+
+  it("composes the filter onto stream() the same way", async () => {
+    const config = xaiVertexProviderConfig("proj");
+    let calls = 0;
+    const callerFetch: typeof fetch = async () => {
+      calls++;
+      return completionStream(["ok"]);
+    };
+
+    const message = await config.api
+      .stream(
+        config.models[0],
+        { messages: [{ role: "user", content: "hi", timestamp: Date.now() }] },
+        { apiKey: "tok", fetch: callerFetch },
+      )
+      .result();
+
+    assert.equal(message.stopReason, "stop");
+    assert.deepEqual(message.content, [{ type: "text", text: "ok" }]);
+    assert.equal(calls, 1);
+  });
+
+  it("keeps every member of the wrapped api, including ones pi adds later", () => {
+    const base: ProviderStreams & { later: string } = {
+      stream: () => {
+        throw new Error("unused");
+      },
+      streamSimple: () => {
+        throw new Error("unused");
+      },
+      cancelDeferred: async () => {},
+      later: "a member this version of ProviderStreams does not declare",
+    };
+    const wrapped = wrapApiWithFetch(base);
+    assert.equal(wrapped.cancelDeferred, base.cancelDeferred);
+    assert.equal(wrapped.fetchDeferred, undefined);
+    assert.equal(Object.getOwnPropertyDescriptor(wrapped, "later")?.value, base.later);
+    assert.notEqual(wrapped.stream, base.stream);
+    assert.notEqual(wrapped.streamSimple, base.streamSimple);
   });
 });
