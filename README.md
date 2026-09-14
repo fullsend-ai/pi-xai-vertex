@@ -48,7 +48,17 @@ pi reports spend with these automatically. Note the long-context rate applies to
 request** once the prompt crosses 200K, output included — not just the excess.
 
 Roughly, against Claude Sonnet 5 ($2 / $10, cache read $0.20, no long-context premium): Grok is
-~40% cheaper on output at short context, and pricier above 200K or on cache-heavy agent loops.
+~40% cheaper on output at short context, and pricier above 200K — where, per
+[Prompt caching](#prompt-caching) below, cache reads should not be assumed.
+
+## Prompt caching
+
+Caching on Vertex is automatic and best-effort: xAI's docs describe entries being evicted under
+memory pressure and requests being routed to different servers, with nothing in the request that
+selects a cache ([How prompt caching works](https://docs.x.ai/developers/advanced-api-usage/prompt-caching/how-it-works)).
+Small and mid-size repeated prefixes may hit. Prompts above roughly 100K tokens rarely do, and long
+multi-turn agent loops — where the prompt keeps growing turn over turn — should be budgeted at full
+input price rather than assumed cache reads.
 
 ## Using alongside other Vertex providers
 
