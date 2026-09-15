@@ -113,8 +113,8 @@ export function authResultFrom(token: string | null | undefined): AuthResult {
  * xAI bills long context request-wide — "requests whose prompt reaches the listed token threshold
  * are billed at the higher rate for all tokens in the request" — which is exactly pi's tier
  * semantics ("the highest matching input threshold applies to the full request"), so this maps 1:1
- * rather than needing per-token splitting. Grok has no cache-*write* charge: caching is automatic
- * and only reads are priced.
+ * rather than needing per-token splitting. On xAI's own API, Grok has no cache-*write* charge:
+ * caching is automatic and only reads are priced.
  *
  * `cacheRead` is kept only because the endpoint occasionally reports non-zero `cached_tokens`, not
  * because caching is supported: it is unsupported (preview offering) for Grok 4.6 on Vertex AI, per
