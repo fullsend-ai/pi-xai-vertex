@@ -610,10 +610,9 @@ describe("the provider's api", () => {
       .result();
 
     assert.equal(message.stopReason, "error");
-    // pi 1.5.0 changed the error text for a keepalive frame reaching the unwrapped adapter from
-    // "keepalive" to a generic SSE parse failure; pi 1.3.0 and earlier still say "keepalive". Accept
-    // either message — what this test guards against is the unwrapped adapter *succeeding*.
-    assert.match(message.errorMessage ?? "", /keepalive|malformed server-sent event JSON/);
+    // pi >= 1.0 (openai SDK 7) reports a generic SSE parse failure for the keepalive frame; what
+    // this guards is the unwrapped adapter failing at all.
+    assert.match(message.errorMessage ?? "", /malformed server-sent event JSON/);
   });
 
   it("composes the filter onto stream() the same way", async () => {
