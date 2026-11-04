@@ -13,6 +13,16 @@ npm ci          # installs pi as a peer; tsc and the tests need its types
 npm run ci      # lint + test — must pass before any commit
 ```
 
+`npm ci` installs the lockfile's pi (1.5.0). CI runs against each pi version in its matrix
+(1.3.0, which is what fullsend's sandbox runs, and 1.5.0); check both explicitly before pushing:
+
+```bash
+npm install --no-save --ignore-scripts @earendil-works/pi-ai@1.3.0 @earendil-works/pi-coding-agent@1.3.0
+npm run ci
+npm ci   # back to the lockfile's 1.5.0
+npm run ci
+```
+
 ## Rules
 
 - **Never cast at `createProvider()`.** `Model`, `ModelCost` and `AuthResult` come from

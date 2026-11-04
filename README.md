@@ -155,7 +155,7 @@ full precedence.
 
 ## Requirements
 
-- pi ≥ 0.84
+- pi ≥ 1.3.0 (CI runs 1.3.0 and 1.5.0 on every commit)
 - A GCP project with the Grok model enabled in Vertex AI Model Garden
 - ADC credentials (`gcloud auth application-default login`, or `GOOGLE_APPLICATION_CREDENTIALS`)
 

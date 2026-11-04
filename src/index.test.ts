@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { calculateCost, createProvider } from "@earendil-works/pi-ai";
+import { calculateCost, createProvider, normalizeContext } from "@earendil-works/pi-ai";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/compat";
 import type { ProviderStreams, Usage } from "@earendil-works/pi-ai";
 import {
@@ -586,7 +586,7 @@ describe("the provider's api", () => {
     const message = await config.api
       .streamSimple(
         config.models[0],
-        { messages: [{ role: "user", content: "hi", timestamp: Date.now() }] },
+        normalizeContext({ messages: [{ role: "user", content: "hi", timestamp: Date.now() }] }),
         { apiKey: "tok", fetch: callerFetch },
       )
       .result();
@@ -604,13 +604,15 @@ describe("the provider's api", () => {
     const message = await openAICompletionsApi()
       .streamSimple(
         config.models[0],
-        { messages: [{ role: "user", content: "hi", timestamp: Date.now() }] },
+        normalizeContext({ messages: [{ role: "user", content: "hi", timestamp: Date.now() }] }),
         { apiKey: "tok", fetch: rawFetch },
       )
       .result();
 
     assert.equal(message.stopReason, "error");
-    assert.match(message.errorMessage ?? "", /keepalive/);
+    // pi >= 1.0 (openai SDK 7) reports a generic SSE parse failure for the keepalive frame; what
+    // this guards is the unwrapped adapter failing at all.
+    assert.match(message.errorMessage ?? "", /malformed server-sent event JSON/);
   });
 
   it("composes the filter onto stream() the same way", async () => {
@@ -624,7 +626,7 @@ describe("the provider's api", () => {
     const message = await config.api
       .stream(
         config.models[0],
-        { messages: [{ role: "user", content: "hi", timestamp: Date.now() }] },
+        normalizeContext({ messages: [{ role: "user", content: "hi", timestamp: Date.now() }] }),
         { apiKey: "tok", fetch: callerFetch },
       )
       .result();
