@@ -147,6 +147,11 @@ digest, so it is published rather than left for each consumer to derive.
 There is no npm publish step: the package is consumed with `pi install git:...`, so the git tag is
 the artifact. Adding one is a few lines plus an `NPM_TOKEN` secret if that ever changes.
 
+Because there is no npm publish gate, a dependency bump that raises a transitive `engines.node`
+floor (check the lockfile) must update this package's own `engines.node` in the same commit —
+otherwise a consumer's own Node version is the only thing that catches the mismatch, and it does so
+with a confusing runtime failure instead of an install-time warning.
+
 ## Prior art
 
 Not drop-in for pi, but the same idea, and worth reading before changing the auth path:
