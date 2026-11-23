@@ -12,6 +12,9 @@
   "bugs": {
     "url": "https://github.com/fullsend-ai/pi-xai-vertex/issues"
   },
+  "engines": {
+    "node": ">=22"
+  },
   "pi": {
     "extensions": [
       "./src/index.ts"
